@@ -26,6 +26,7 @@ const zluxUtil = require('./util');
 const configService = require('../plugins/config/lib/configService.js');
 const proxy = require('./proxy');
 const zLuxUrl = require('./url');
+const os = require('os');
 const UNP = require('./unp-constants');
 const translationUtils = require('./translation-utils');
 
@@ -515,28 +516,8 @@ WebApp.prototype = {
         this.appData));
   },
 
-  installRootServices() {
-    const serviceHandleMap = {};
-    for (const proxiedRootService of this.options.rootServices || []) {
-      const name = proxiedRootService.name || proxiedRootService.url.replace("/", "");
-      installLog.info(`installing root service proxy at ${proxiedRootService.url}`);
-      //note that it has to be explicitly false. other falsy values like undefined
-      //are treated as default, which is true
-      if (proxiedRootService.requiresAuth === false) {
-        const proxyRouter = this.makeProxy(proxiedRootService.url, true);
-        this.expressApp.use(proxiedRootService.url,
-            proxyRouter);
-      } else {
-        const proxyRouter = this.makeProxy(proxiedRootService.url);
-        this.expressApp.use(proxiedRootService.url,
-            this.auth.middleware,
-            proxyRouter);
-      }
-      serviceHandleMap[name] = new WebServiceHandle(proxiedRootService.url, 
-          this.options.httpPort, this.options.httpsPort);
-    }
-    this.expressApp.use(commonMiddleware.injectServiceHandles(serviceHandleMap,
-        true));
+  installServerAuthAPIs() {
+
     this.expressApp.post('/auth',
         jsonParser,
         (req, res, next) => {
@@ -572,44 +553,171 @@ WebApp.prototype = {
             this.authServiceHandleMaps;
           next();
         },
-        this.auth.doLogout); 
-    serviceHandleMap['auth'] = new WebServiceHandle('/auth', 
-        this.options.httpPort, this.options.httpsPort);
-    this.expressApp.get('/plugins', 
-        //this.auth.middleware, 
-        staticHandlers.plugins(this.plugins));
-    serviceHandleMap['plugins'] = new WebServiceHandle('/plugins', 
-        this.options.httpPort, this.options.httpsPort);
+        this.auth.doLogout);
+  },
+
+  installServerConfigAPIs() {
+    /*
+    serverInfo = {
+      ports: {
+        http: 1,
+        https: 2
+      },
+      directories: {
+        product
+        site
+        instance
+        group
+        user
+        plugins
+      },
+      agents: {
+
+      },
+      os: {
+
+      }
+    }
+    */
     this.expressApp.get('/server/proxies', 
         this.auth.middleware, 
       (req, res) =>{
         contentLogger.log(contentLogger.INFO, '/server/proxies\n' + util.inspect(req));      
         res.json({"zssServerHostName":this.options.proxiedHost,"zssPort":this.options.proxiedPort});
-      }); 
-    serviceHandleMap['server/proxies'] = new WebServiceHandle('/server/proxies', 
-        this.options.httpPort, this.options.httpsPort);
+      });
+    this.expressApp.get('/server/os',
+                        (req, res) => {
+                          let chunks = [];
+                          let resJson = {
+                            zlux: {
+                              platform: os.platform(),
+                              type: os.type()
+                            }
+                          }
+                          let req2 = http.request({host: this.options.proxiedHost, port: this.options.proxiedPort,
+                                                   family: 4, path: '/agent/os', method: 'GET'}, (res2) => {
+                                                     res2.on('data',(chunk)=> {
+                                                       chunks.push(chunk);
+                                                     });
+                                                     res2.on('end',()=> {
+                                                       let body = Buffer.concat(chunks).toString();
+                                                       try {
+                                                         resJson.osAgent = JSON.parse(body).os;
+                                                       } catch (e) {
+                                                         resJson.osAgent = {
+                                                           platform: 'unknown',
+                                                           type: 'unknown'
+                                                         }
+                                                       }
+                                                       res.status(200).json(resJson);
+                                                     });
+                                        });
+                          req2.on('error',(e)=> {
+                            contentLogger.warn(`Error on request OS Agent platform, e=${e}`);
+                            resJson.osAgent = {
+                              platform: 'unknown',
+                              type: 'unknown'
+                            }
+                            res.status(200).json(resJson);                            
+                          });
+                          req2.end();
+                        });
+  },
+
+  installTestAgent() {
+    this.expressApp.get('/agent/os',(req,res)=> {
+      res.status(200).json({os:{platform:os.platform(), type: os.type()}});
+    });
+    this.expressApp.get('/agent/services',(req,res)=> {
+      res.status(200).json({
+        services: [
+          {
+            method: '*',
+            url: '/echo',
+            requiresAuth: false
+          },
+        ]
+      });
+    });
+  },
+
+  installServerAPIs() {
+    this.installServerAuthAPIs(); 
+    this.expressApp.get('/plugins', 
+        //this.auth.middleware, 
+                        staticHandlers.plugins(this.plugins));
+    this.installServerConfigAPIs();
     this.expressApp.get('/echo/*', 
       this.auth.middleware, 
       (req, res) =>{
         contentLogger.log(contentLogger.INFO, 'echo\n' + util.inspect(req));
         res.json(req.params);
       });
-    serviceHandleMap['echo'] = new WebServiceHandle('/echo', 
-        this.options.httpPort, this.options.httpsPort);
-    this.expressApp.get('/echo/*',  
-      this.auth.middleware, 
-      (req, res) =>{
-        contentLogger.log(contentLogger.INFO, 'echo\n' + util.inspect(req));
-        res.json(req.params);
-      });
-    serviceHandleMap['echo'] = new WebServiceHandle('/echo', 
-        this.options.httpPort, this.options.httpsPort);
     this.expressApp.use('/apiManagement/', 
         this.auth.middleware, 
         staticHandlers.apiManagement(this));
-    serviceHandleMap['apiManagement'] = new WebServiceHandle('/apiManagement', 
-        this.options.httpPort, this.options.httpsPort);
     this.expressApp.use(staticHandlers.eureka());
+  },
+
+  installProxiedRootServices: function(){
+    return new Promise((resolve, reject)=> {
+      if (this.options.osAgentHost !== undefined && this.options.osAgentPort !== undefined) {
+        bootstrapLogger.info('Starting with OS Agent');
+        let request = http.request({host: this.options.osAgentHost, port: this.options.osAgentPort,
+                                    family: 4, path: '/agent/services', method: 'GET'}, (res) => {
+                                      let chunks = [];
+                                      res.on('data', (chunk)=> {
+                                        chunks.push(chunk);
+                                      });
+                                      res.on('end',()=> {
+                                        if (res.statusCode === 200) {
+                                          let body = Buffer.concat(chunks).toString();
+                                          try {
+                                            let json = JSON.parse(body);
+                                            const serviceHandleMap = {};
+                                            for (const proxiedRootService of json.services || []) {
+                                              const name = proxiedRootService.name || proxiedRootService.url.replace("/", "");
+                                              installLog.info(`installing root service proxy at ${proxiedRootService.url}`);
+                                              //note that it has to be explicitly false. other falsy values like undefined
+                                              //are treated as default, which is true
+                                              if (proxiedRootService.requiresAuth === false) {
+                                                const proxyRouter = this.makeProxy(proxiedRootService.url, true);
+                                                this.expressApp.use(proxiedRootService.url,
+                                                                    proxyRouter);
+                                              } else {
+                                                const proxyRouter = this.makeProxy(proxiedRootService.url);
+                                                this.expressApp.use(proxiedRootService.url,
+                                                                    this.auth.middleware,
+                                                                    proxyRouter);
+                                              }
+                                              serviceHandleMap[name] = new WebServiceHandle(proxiedRootService.url, 
+                                                                                            this.options.httpPort, this.options.httpsPort);
+                                            }
+                                            this.expressApp.use(commonMiddleware.injectServiceHandles(serviceHandleMap,
+                                                                                                      true));
+                                            resolve();
+                                          } catch (e) {
+                                            bootstrapLogger.severe(`JSON parse error from OS Agent response. Body was=${body}`);
+                                            bootstrapLogger.severe(`Stopping...`);
+                                            process.exit(5);                            
+                                          }
+                                        } else {
+                                          bootstrapLogger.severe(`Error communicating with OS Agent, return status=${res.statusCode}. Stopping...`);
+                                          process.exit(5);
+                                        }
+                                      });
+                                    });
+        request.on('error', (e)=> {
+          bootstrapLogger.severe(`Could not establish connection with OS Agent, Error=${e}`);
+          bootstrapLogger.severe('Stopping...');
+          process.exit(5);
+        });
+        request.end();
+      } else {
+        bootstrapLogger.info('Starting in standalone mode');
+        resolve();
+      }
+    });
   },
   
   _makeRouterForLegacyService(pluginContext, service) {
@@ -934,13 +1042,16 @@ WebApp.prototype = {
   }
 };
 
-module.exports.makeWebApp = function (options) {
+module.exports.makeWebApp = function* (options) {
   const webApp = new WebApp(options);
   webApp.installCommonMiddleware();
   webApp.installStaticHanders();
-  webApp.installRootServices();
-  webApp.injectPluginRouter();
-  webApp.installErrorHanders();
+  webApp.installTestAgent();
+  yield webApp.installProxiedRootServices().then(()=> {
+    webApp.installServerAPIs();
+    webApp.injectPluginRouter();
+    webApp.installErrorHanders();
+  });
   return webApp;
 };
 

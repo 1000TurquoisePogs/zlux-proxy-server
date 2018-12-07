@@ -132,8 +132,11 @@ Server.prototype = {
       httpsPort: wsConfig.https ? wsConfig.https.port : undefined,
       productCode: this.appConfig.productCode,
       productDir: this.userConfig.productDir,
-      proxiedHost: this.startUpConfig.proxiedHost,
-      proxiedPort: this.startUpConfig.proxiedPort,
+      //deprecated, to be removed in place of osAgentHost and osAgentPort later      
+      proxiedHost: this.startUpConfig.osAgentHost,
+      proxiedPort: this.startUpConfig.osAgentPort,
+      osAgentHost: this.startUpConfig.osAgentHost,
+      osAgentPort: this.startUpConfig.osAgentPort,
       allowInvalidTLSProxy: this.startUpConfig.allowInvalidTLSProxy,
       rootRedirectURL: this.appConfig.rootRedirectURL,
       rootServices: this.appConfig.rootServices,
@@ -145,7 +148,7 @@ Server.prototype = {
       newPluginHandler: (pluginDef) => this.newPluginSubmitted(pluginDef),
       auth: webauth
     };
-    this.webApp = makeWebApp(webAppOptions);
+    this.webApp = yield *makeWebApp(webAppOptions);
     this.webServer.startListening(this.webApp.expressApp);
     let pluginsLoaded = [];
     this.pluginLoader.on('pluginAdded', util.asyncEventListener(event => {
