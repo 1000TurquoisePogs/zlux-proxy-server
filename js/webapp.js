@@ -34,8 +34,9 @@ const translationUtils = require('./translation-utils');
  * Sets up an Express application to serve plugin data files and services  
  */
 
-const DEFAULT_SESSION_TIMEOUT_MS = 60 /* min */ * 60 * 1000;
+const TEMPORARY_HACK_TO_EXCLUDE_OVERLAPPING_ROOT_SERVICES = ['plugins', 'auth', 'auth-logout', 'agent/os'];
 
+const DEFAULT_SESSION_TIMEOUT_MS = 60 /* min */ * 60 * 1000;
 const SERVICE_TYPE_NODE = 0;
 const SERVICE_TYPE_PROXY = 1;
 const PROXY_SERVER_CONFIGJS_URL = '/plugins/com.rs.configjs/services/data/';
@@ -587,40 +588,11 @@ WebApp.prototype = {
       });
     this.expressApp.get('/server/os',
                         (req, res) => {
-                          let chunks = [];
-                          let resJson = {
-                            zlux: {
-                              platform: os.platform(),
-                              type: os.type()
-                            }
+                          if (this.osInfo) {
+                            res.status(200).json(this.osInfo);
+                          } else {
+                            res.status(500).json({error: 'OS info not found'});
                           }
-                          let req2 = http.request({host: this.options.proxiedHost, port: this.options.proxiedPort,
-                                                   family: 4, path: '/agent/os', method: 'GET'}, (res2) => {
-                                                     res2.on('data',(chunk)=> {
-                                                       chunks.push(chunk);
-                                                     });
-                                                     res2.on('end',()=> {
-                                                       let body = Buffer.concat(chunks).toString();
-                                                       try {
-                                                         resJson.osAgent = JSON.parse(body).os;
-                                                       } catch (e) {
-                                                         resJson.osAgent = {
-                                                           platform: 'unknown',
-                                                           type: 'unknown'
-                                                         }
-                                                       }
-                                                       res.status(200).json(resJson);
-                                                     });
-                                        });
-                          req2.on('error',(e)=> {
-                            contentLogger.warn(`Error on request OS Agent platform, e=${e}`);
-                            resJson.osAgent = {
-                              platform: 'unknown',
-                              type: 'unknown'
-                            }
-                            res.status(200).json(resJson);                            
-                          });
-                          req2.end();
                         });
   },
 
@@ -659,60 +631,142 @@ WebApp.prototype = {
     this.expressApp.use(staticHandlers.eureka());
   },
 
-  installProxiedRootServices: function(){
+  _installProxiedRootServicesInner: function(success, fail) {
+    bootstrapLogger.info(`Connecting to OS Agent at ${this.options.osAgentHost}:${this.options.osAgentPort}...`);
+    let request = http.request({host: this.options.osAgentHost, port: this.options.osAgentPort,
+                                family: 4, path: '/agent/services', method: 'GET'}, (res) => {
+                                  let chunks = [];
+                                  res.on('data', (chunk)=> {
+                                    chunks.push(chunk);
+                                  });
+                                  res.on('end',()=> {
+                                    if (res.statusCode === 200) {
+                                      bootstrapLogger.info(`Connecting to OS Agent succeeded.`);
+                                      let body = Buffer.concat(chunks).toString();
+                                      try {
+                                        let json = JSON.parse(body);
+                                        const serviceHandleMap = {};
+                                        for (const proxiedRootService of json.services || []) {
+                                          let name = proxiedRootService.name || proxiedRootService.url;
+                                          if (name.startsWith('/')) {
+                                            name = name.substring(1);
+                                          }
+                                          if (TEMPORARY_HACK_TO_EXCLUDE_OVERLAPPING_ROOT_SERVICES.includes(name)) {
+                                            installLog.warn(`Excluding overlapping root service provided by agent at ${name}`);
+                                          } else {
+                                            installLog.info(`installing root service proxy at ${name}`);
+                                            //note that it has to be explicitly false. other falsy values like undefined
+                                            //are treated as default, which is true
+                                            if (proxiedRootService.requiresAuth === false) {
+                                              const proxyRouter = this.makeProxy(proxiedRootService.url, true);
+                                              this.expressApp.use(proxiedRootService.url,
+                                                                  proxyRouter);
+                                            } else {
+                                              const proxyRouter = this.makeProxy(proxiedRootService.url);
+                                              this.expressApp.use(proxiedRootService.url,
+                                                                  this.auth.middleware,
+                                                                  proxyRouter);
+                                            }
+                                            serviceHandleMap[name] = new WebServiceHandle(proxiedRootService.url, 
+                                                                                          this.options.httpPort, this.options.httpsPort);
+                                          }
+                                        }
+                                        this.expressApp.use(commonMiddleware.injectServiceHandles(serviceHandleMap,
+                                                                                                  true));
+                                        success();
+                                      } catch (e) {
+                                        bootstrapLogger.severe(`JSON parse error from OS Agent response. Body was=${body}`);
+                                        bootstrapLogger.severe(e);
+                                        bootstrapLogger.severe(`Stopping...`);
+                                        process.exit(UNP.UNP_EXIT_AGENT_CONNECTION_FAIL);                            
+                                      }
+                                    } else {
+                                      bootstrapLogger.severe(`Error communicating with OS Agent, return status=${res.statusCode} for url=/agent/services.`);
+                                      fail();
+                                    }
+                                  });
+                                });
+    request.on('error', (e)=> {
+      bootstrapLogger.severe(`Could not establish connection with OS Agent, Error=${e}`);
+      fail();
+    });
+    request.end();
+  },
+
+  _installProxiedRootServices: function(success, fail, maxAttempts, currentAttempt) {
+    this._installProxiedRootServicesInner((body)=> {
+      success(body);
+    }, (error)=> {
+      if (isNaN(currentAttempt)) {
+        currentAttempt = 0;
+      }
+      ++currentAttempt;
+      if (currentAttempt == maxAttempts) {
+        fail();
+      } else {
+        bootstrapLogger.warn('Failed to contact OS Agent, retrying in 3 seconds...');
+        setTimeout(()=> {this._installProxiedRootServices(success, fail, maxAttempts, currentAttempt);}, 3000);
+      }
+    });
+  },
+
+  _getAgentOS: function() {
+    return new Promise((resolve, reject)=> {
+      let request = http.request({host: this.options.osAgentHost, port: this.options.osAgentPort,
+                                  family: 4, path: '/agent/os', method: 'GET'}, (res) => {
+                                    let chunks = [];
+                                    res.on('data', (chunk)=> {
+                                      chunks.push(chunk);
+                                    });
+                                    res.on('end',()=> {
+                                      if (res.statusCode === 200) {
+                                        let body = Buffer.concat(chunks).toString();
+                                        try {
+                                          let json = JSON.parse(body);
+                                          resolve(json);
+                                        } catch (e) {
+                                          bootstrapLogger.severe(`JSON parse error from OS Agent response. Body was=${body}`);
+                                          reject(e);
+                                        }
+                                      } else {
+                                        let errMsg = `Error communicating with OS Agent, return status=${res.statusCode} for url=/agent/os.`;
+                                        bootstrapLogger.severe(errMsg);
+                                        reject(new Error(errMsg));
+                                      }
+                                    });
+                                  });
+      request.on('error', (e)=> {
+        bootstrapLogger.severe(`Could not establish connection with OS Agent, Error=${e}`);
+        reject(e);
+      });
+      request.end();      
+    });
+  },
+
+  connectToAgent: function(){
     return new Promise((resolve, reject)=> {
       if (this.options.osAgentHost !== undefined && this.options.osAgentPort !== undefined) {
         bootstrapLogger.info('Starting with OS Agent');
-        let request = http.request({host: this.options.osAgentHost, port: this.options.osAgentPort,
-                                    family: 4, path: '/agent/services', method: 'GET'}, (res) => {
-                                      let chunks = [];
-                                      res.on('data', (chunk)=> {
-                                        chunks.push(chunk);
-                                      });
-                                      res.on('end',()=> {
-                                        if (res.statusCode === 200) {
-                                          let body = Buffer.concat(chunks).toString();
-                                          try {
-                                            let json = JSON.parse(body);
-                                            const serviceHandleMap = {};
-                                            for (const proxiedRootService of json.services || []) {
-                                              const name = proxiedRootService.name || proxiedRootService.url.replace("/", "");
-                                              installLog.info(`installing root service proxy at ${proxiedRootService.url}`);
-                                              //note that it has to be explicitly false. other falsy values like undefined
-                                              //are treated as default, which is true
-                                              if (proxiedRootService.requiresAuth === false) {
-                                                const proxyRouter = this.makeProxy(proxiedRootService.url, true);
-                                                this.expressApp.use(proxiedRootService.url,
-                                                                    proxyRouter);
-                                              } else {
-                                                const proxyRouter = this.makeProxy(proxiedRootService.url);
-                                                this.expressApp.use(proxiedRootService.url,
-                                                                    this.auth.middleware,
-                                                                    proxyRouter);
-                                              }
-                                              serviceHandleMap[name] = new WebServiceHandle(proxiedRootService.url, 
-                                                                                            this.options.httpPort, this.options.httpsPort);
-                                            }
-                                            this.expressApp.use(commonMiddleware.injectServiceHandles(serviceHandleMap,
-                                                                                                      true));
-                                            resolve();
-                                          } catch (e) {
-                                            bootstrapLogger.severe(`JSON parse error from OS Agent response. Body was=${body}`);
-                                            bootstrapLogger.severe(`Stopping...`);
-                                            process.exit(5);                            
-                                          }
-                                        } else {
-                                          bootstrapLogger.severe(`Error communicating with OS Agent, return status=${res.statusCode}. Stopping...`);
-                                          process.exit(5);
-                                        }
-                                      });
-                                    });
-        request.on('error', (e)=> {
-          bootstrapLogger.severe(`Could not establish connection with OS Agent, Error=${e}`);
-          bootstrapLogger.severe('Stopping...');
-          process.exit(5);
-        });
-        request.end();
+        this._installProxiedRootServices(()=> {
+          this._getAgentOS().then((agentInfo)=> {
+            this.osInfo = {
+              zlux: {
+                platform: os.platform(),
+                type: os.type()
+              },
+              osAgent: agentInfo
+            }
+            zluxUtil.deepFreeze(this.osInfo);
+            resolve();
+          }).catch((e)=> {
+            bootstrapLogger.severe(`Error in identifying OS Agent OS info, Error=${e}`);
+            bootstrapLogger.severe('Stopping...');
+            process.exit(UNP.UNP_EXIT_AGENT_CONNECTION_FAIL);
+          });
+        }, ()=> {
+          bootstrapLogger.severe('Stopping due to max connection attempts exceeded...');
+          process.exit(UNP.UNP_EXIT_AGENT_CONNECTION_FAIL);
+        }, UNP.AGENT_CONNECTION_MAX_ATTEMPTS);
       } else {
         bootstrapLogger.info('Starting in standalone mode');
         resolve();
@@ -1047,7 +1101,7 @@ module.exports.makeWebApp = function* (options) {
   webApp.installCommonMiddleware();
   webApp.installStaticHanders();
   webApp.installTestAgent();
-  yield webApp.installProxiedRootServices().then(()=> {
+  yield webApp.connectToAgent().then(()=> {
     webApp.installServerAPIs();
     webApp.injectPluginRouter();
     webApp.installErrorHanders();
