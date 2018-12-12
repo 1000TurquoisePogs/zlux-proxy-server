@@ -769,6 +769,13 @@ WebApp.prototype = {
         }, UNP.AGENT_CONNECTION_MAX_ATTEMPTS);
       } else {
         bootstrapLogger.info('Starting in standalone mode');
+        this.osInfo = {
+          zlux: {
+            platform: os.platform(),
+            type: os.type()
+          }
+        }
+        zluxUtil.deepFreeze(this.osInfo);
         resolve();
       }
     });
