@@ -723,7 +723,7 @@ WebApp.prototype = {
                                         let body = Buffer.concat(chunks).toString();
                                         try {
                                           let json = JSON.parse(body);
-                                          resolve(json);
+                                          resolve(json.osAgent);
                                         } catch (e) {
                                           bootstrapLogger.severe(`JSON parse error from OS Agent response. Body was=${body}`);
                                           reject(e);
