@@ -16,6 +16,6 @@
   },
   "homepage": "https://github.com/zowe/zlux-proxy-server#readme",
   "dependencies": {
-    "zlux-shared": "git+ssh://git@github.com:1000TurqoisePogs/zlux-shared.git#feature\/test-npm-deps"
+    "zlux-shared": "git+ssh://git@github.com:1000TurquoisePogs/zlux-shared.git#feature\/test-npm-deps"
   }    
 }
