@@ -1483,72 +1483,77 @@ function replaceOrCreateFile(response, filename, directories, scope, relativePat
 
   
   fs.open(path,'w',mode,function(error, fd) {
-    if (!error) {
-      var offset = 0;
-      var contentLength = content.length;
-      var buff = Buffer.from(content,'utf8');
-      var writeCallback = function(err,writtenLength,buffer) {
-        contentLength -= writtenLength;
-        offset += writtenLength;
-        if (contentLength == 0) {
-          var handleException = function(e) {
-            respondWithJsonError(response,"Failed to close written item.",HTTP_STATUS_INTERNAL_SERVER_ERROR,location);
-            logger.warn('Error occurred while closing file. File='+path+'. Error='+e.message);
-            return;
-          };
-          try {
-            fs.fstat(fd,(err,stats)=> {
-              if (err) {
-                respondWithJsonError(response,"Failed to stat item.",HTTP_STATUS_INTERNAL_SERVER_ERROR,location);                
-              } else {
-                let maccess = -1;
-                if (stats.mtimeMs) {
-                  maccess = stats.mtimeMs;
-                } else if (stats.mtime) {
-                  maccess = new Date(stats.mtime).getTime();
+    try {
+      if (!error) {
+        var offset = 0;
+        var contentLength = content.length;
+        var buff = Buffer.from(content,'utf8');
+        var writeCallback = function(err,writtenLength,buffer) {
+          contentLength -= writtenLength;
+          offset += writtenLength;
+          if (contentLength == 0) {
+            var handleException = function(e) {
+              respondWithJsonError(response,"Failed to close written item.",HTTP_STATUS_INTERNAL_SERVER_ERROR,location);
+              logger.warn('Error occurred while closing file. File='+path+'. Error='+e.message);
+              return;
+            };
+            try {
+              fs.fstat(fd,(err,stats)=> {
+                if (err) {
+                  respondWithJsonError(response,"Failed to stat item.",HTTP_STATUS_INTERNAL_SERVER_ERROR,location);
+                } else {
+                  let maccess = -1;
+                  if (stats.mtimeMs) {
+                    maccess = stats.mtimeMs;
+                  } else if (stats.mtime) {
+                    maccess = new Date(stats.mtime).getTime();
+                  }
+                  fs.close(fd,(exception)=>{
+                    if (exception) {
+                      handleException(exception);
+                    }
+                    else {
+                      response.status(201);
+                      var streamer = jStreamer.respondWithJsonStreamer(response);
+                      jStreamer.jsonStart(streamer);
+                      jStreamer.jsonAddString(streamer,"_objectType",MSG_TYPE_UPDATE);
+                      jStreamer.jsonAddString(streamer,"_metadataVersion", CURRENT_JSON_VERSION);
+                      jStreamer.jsonAddString(streamer,"resourceID",location);
+                      jStreamer.jsonAddInt(streamer,maccess,"maccessms");                  
+                      jStreamer.jsonAddString(streamer,"result","Replaced item.");
+                      jStreamer.jsonEnd(streamer);
+                      finishResponse(response);
+                      logger.debug(`Configuration service request complete. Resource=${location}`);
+                    }
+                  });
                 }
-                fs.close(fd,(exception)=>{
-                  if (exception) {
-                    handleException(exception);
-                  }
-                  else {
-                    response.status(201);
-                    var streamer = jStreamer.respondWithJsonStreamer(response);
-                    jStreamer.jsonStart(streamer);
-                    jStreamer.jsonAddString(streamer,"_objectType",MSG_TYPE_UPDATE);
-                    jStreamer.jsonAddString(streamer,"_metadataVersion", CURRENT_JSON_VERSION);
-                    jStreamer.jsonAddString(streamer,"resourceID",location);
-                    jStreamer.jsonAddInt(streamer,maccess,"maccessms");                  
-                    jStreamer.jsonAddString(streamer,"result","Replaced item.");
-                    jStreamer.jsonEnd(streamer);
-                    finishResponse(response);
-                    logger.debug(`Configuration service request complete. Resource=${location}`);
-                  }
-                });
-              }
+              });
+            }
+            catch (e) {
+              handleException(e);
+            }
+          }
+          else if (writtenLength < 0 || err) {
+            logger.warn("Error occurred while writing file. File="+path+". Error="+err);
+            respondWithJsonError(response,"Failed to write item.",HTTP_STATUS_INTERNAL_SERVER_ERROR,location);
+            fs.close(fd,function(){
+              logger.debug('file closed');
             });
+            return;  
           }
-          catch (e) {
-            handleException(e);
+          else {
+            fs.write(fd,buff,offset,contentLength,writeCallback);
           }
-        }
-        else if (writtenLength < 0 || err) {
-          logger.warn("Error occurred while writing file. File="+path+". Error="+err);
-          respondWithJsonError(response,"Failed to write item.",HTTP_STATUS_INTERNAL_SERVER_ERROR,location);
-          fs.close(fd,function(){
-            logger.debug('file closed');
-          });
-          return;  
-        }
-        else {
-          fs.write(fd,buff,offset,contentLength,writeCallback);
-        }
-      };
-      fs.write(fd,buff,offset,contentLength,writeCallback);
-    }
-    else {
-      logger.warn('Exception when opening file for writing. File='+path+'. Error='+error.message);
-      respondWithJsonError(response,"Failed to open item for writing.",HTTP_STATUS_INTERNAL_SERVER_ERROR,location);
+        };
+        fs.write(fd,buff,offset,contentLength,writeCallback);
+      }
+      else {
+        logger.warn('Exception when opening file for writing. File='+path+'. Error='+error.message);
+        respondWithJsonError(response,"Failed to open item for writing.",HTTP_STATUS_INTERNAL_SERVER_ERROR,location);
+      }
+    } catch (e) {
+      respondWithJsonError(response,"Internal error on replace or create file",
+                           HTTP_STATUS_INTERNAL_SERVER_ERROR,location);
     }
   });
     /*
