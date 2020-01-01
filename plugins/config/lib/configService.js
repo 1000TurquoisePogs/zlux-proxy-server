@@ -2396,6 +2396,8 @@ function ConfigService(context) {
   this.context = context;
   this.directoryConfig = context.plugin.server.config.user;
   this.productConfig = context.plugin.server.config.app;
+  const publicResources = this.directoryConfig.configService && this.directoryConfig.configService.publicResources
+                          ? this.directoryConfig.configService.publicResources : [];
   logger = context.logger;
   accessLogger = context.makeSublogger('access');
   this.pluginDefs = context.plugin.server.state.pluginMap;
@@ -2541,8 +2543,8 @@ function ConfigService(context) {
     }
     
     request.resourceURL+='/'+scope;
-    if (request.scope == CONFIG_SCOPE_USER && !request.username) {
-      respondWithJsonError(response,"Requested user scope without providing username",HTTP_STATUS_BAD_REQUEST);
+    if (!request.username) {
+      respondWithJsonError(response,"Invalid credentials for action",HTTP_STATUS_BAD_REQUEST);
       return;
     }
 
@@ -2599,7 +2601,22 @@ function ConfigService(context) {
     switch (request.method) {
     case 'GET':
     case 'HEAD':
-      return handleGet(request,response,lastPath);
+      if (request.username) {
+        return handleGet(request,response,lastPath);        
+      } else if (publicResources.length > 0) {
+        const resourceToCheck = request.resouceURL;
+        //format: [resources]
+        //such as plugin/scope/ui/launchbar/plugins, or plugin/scope/*
+        for (let pattern of publicResources) {
+          if (resourceToCheck == pattern) {
+            return handleGet(request,response,lastPath);
+          } else if (resourceToCheck.search(new RegExp('^'+pattern)) != -1) {
+            return handleGet(request,response,lastPath);
+          }
+        }
+      }
+      respondWithJsonError(response,"Invalid credentials for action",HTTP_STATUS_BAD_REQUEST);
+      return 1;
     case 'POST':
       return handlePost(request,response,lastPath);
     case 'PUT':
