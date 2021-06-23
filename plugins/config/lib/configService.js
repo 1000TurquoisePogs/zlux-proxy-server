@@ -2071,6 +2071,12 @@ function makeUserConfigurationDirectories(serverSettings, productCode, user) {
   var pluginDir = productCode+'/'+"pluginStorage";
 
   var usersDir = jsonObjectGetString(serverSettings, "usersDir");
+  if (!usersDir) { //default is to put users within instance/users
+    let instDir = jsonObjectGetString(serverSettings, "instanceDir");
+    if (instDir) {
+      usersDir = instDir + '/users';
+    }
+  }
   var userDir = usersDir+'/'+user;
   /*user and group may not be made from the start, create folders if needed*/
   createMissingFolder(null,userDir);
@@ -2622,7 +2628,13 @@ function ConfigService(context) {
     var productCode = this.productConfig.productCode;
 
     var scopeDir = (request.scope == CONFIG_SCOPE_GROUP) ? jsonObjectGetString(directoryConfig, "groupsDir") :
-      jsonObjectGetString(directoryConfig, "usersDir");
+        jsonObjectGetString(directoryConfig, "usersDir");
+    if (!scopeDir) {
+      let instDir = jsonObjectGetString(directoryConfig, "instanceDir");
+      if (instDir) {
+        scopeDir = (request.scope == CONFIG_SCOPE_GROUP) ? instDir + '/groups' : instDir + '/users';
+      }
+    }
     var namedPath = scopeDir + '/' + name;
     var productCodePath = namedPath + '/' + productCode;
     var fullNamedPath = productCodePath + '/pluginStorage';
